@@ -97,9 +97,9 @@ var bible_chapters = [
     {book: "Revelation", chapter: 22, abbr: "rev"},
 ];
 
-var get_chapter = function(book, chapter, cb) {
-    var dirname = trans;
-    var filename = _s.sprintf("%s/%s.%s.%s", trans, book, chapter, trans);
+var get_chapter = function(trans_id, book, chapter, cb) {
+    var dirname = "trans/" + trans;
+    var filename = _s.sprintf("%s/%s.%s.%s", dirname, book, chapter, trans);
     step(
         function() {
             fs.exists(dirname, this);
@@ -118,7 +118,7 @@ var get_chapter = function(book, chapter, cb) {
             } else {
                 debug("File doesn't exist, downloading: " + filename);
                 request(
-                    "https://www.youversion.com/bible/416/" + book + "." + chapter + ".json", 
+                    "https://www.youversion.com/bible/" + trans_id + "/" + book + "." + chapter + ".json", 
                     this
                 );
             }
@@ -140,12 +140,40 @@ var get_chapter = function(book, chapter, cb) {
 
 step(
     function() {
+        // YouVersion provides translations by ID. Having the translation abbreviation in the URL is just for human friendliness, but the machines ignore it.
+        request(
+            {
+                uri: "https://www.youversion.com/versions",
+                headers: {"Accept": "application/json"}
+            }, 
+            this
+        );
+    }, function(err, response, body) {
+        var translations = JSON.parse(body).by_language;
+        var trans_id = null;
+        for(var lang in translations) {
+            if(!translations.hasOwnProperty(lang)) continue;
+
+            for(var translation in translations[lang]["versions"]) {
+                if(!translations[lang]["versions"].hasOwnProperty(translation)) continue;
+
+                if(translations[lang]["versions"][translation]["abbr"].toLowerCase() == trans) {
+                    var trans_id = translations[lang]["versions"][translation]["id"];
+                }
+            }
+        }
+
+        if(trans_id === null) {
+            console.log("Couldn't find YouVersion ID for that translation");
+            process.exit();
+        }
+
         var group = this.group();
         for(var book in bible_chapters) {
             if(!bible_chapters.hasOwnProperty(book)) continue;
 
             for(var i = 1; i <= bible_chapters[book]["chapter"]; i++) {
-                get_chapter(bible_chapters[book]["abbr"].toUpperCase(), i, group());
+                get_chapter(trans_id, bible_chapters[book]["abbr"].toUpperCase(), i, group());
             }
         }
     }, function(err, results) {
