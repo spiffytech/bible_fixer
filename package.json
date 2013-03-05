@@ -7,6 +7,9 @@
     "request": "2.14.x",
     "step": "0.0.5",
     "jQuery": "1.x.x",
+    "jsdom": "x.x.x",
+    "xmlhttprequest": "x.x.x",
+    "memoizee": "0.2.x",
     "underscore.string": "2.3.x"
   },
   "devDependencies": {
