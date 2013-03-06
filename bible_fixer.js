@@ -134,40 +134,19 @@ var munge_word = function(word) {
 }
 
 
-var count_words = function(jQuery, cb) {
-	step(
-		function() {
-			var group = this.group();
-
-			var verses = jQuery(".verse");
-
-			for(var i = 0; i < verses.length; i++) {
-				if(!verses.hasOwnProperty(i)) continue;
-
-				(function(i, cb) {
-					var verse = jQuery(verses[i]);
-					var verse_num = parseInt(jQuery(verse).find(".label").text());
-					var words = jQuery(verse).find(".content").text().replace(/ {2,}/g, "").split(" ");
-					for(var word = 0; word < words.length; words++) {
-						var w = munge_word(words[word]);
-						if(w.indexOf("lovingly") != -1) {
-							true;
-						}
-						if(wordlist[w] === undefined) {
-							wordlist[w] = {};
-							wordlist[w]["count"] = 1;
-						} else {
-							wordlist[w]["count"] += 1;
-						}
-					}
-
-					cb();
-				})(i, group());
-			}
-		}, function(err, results) {
-			cb();
+var count_words = function(book, chapter, verse, verse_text, cb) {
+	var words = jQuery(verse_text).find(".content").text().replace(/ {2,}/g, "").split(" ");
+	for(var word = 0; word < words.length; word++) {
+		var w = munge_word(words[word]);
+		if(wordlist[w] === undefined) {
+			wordlist[w] = {};
+			wordlist[w]["count"] = 1;
+		} else {
+			wordlist[w]["count"] += 1;
 		}
-	);
+	}
+
+	cb();
 }
 
 
@@ -195,7 +174,18 @@ function process_chapter(book, chapter, op, cb) {
 			var jQuery = require("jQuery").create(myWindow);
 			jQuery(data).appendTo("body");
 
-			op(jQuery, cb);
+			var group = this.group();
+			var verses = jQuery(".verse");
+
+			for(var i = 0; i < verses.length; i++) {
+				if(!verses.hasOwnProperty(i)) continue;
+
+				var verse = jQuery(verses[i]);
+				var verse_num = parseInt(jQuery(verse).find(".label").text());
+				op(book, chapter, verse_num, verses[i], group());
+			}
+		}, function(err, results) {
+			cb();
 		}
 	);
 }
@@ -245,8 +235,16 @@ var identify_typos = function(cb) {
 				if(!bible_chapters.hasOwnProperty(book)) continue;
 
 				for(var i = 1; i <= bible_chapters[book]["chapter"]; i++) {
-					process_chapter(bible_chapters[book]["abbr"], i, function(jQuery, cb) {
-						
+					process_chapter(bible_chapters[book]["abbr"], i, function(book, chapter, verse, verse_text, cb) {
+						var words = jQuery(verse_text).find(".content").text().replace(/ {2,}/g, "").split(" ");
+						for(var word in words) {
+							if(!words.hasOwnProperty(word)) continue;
+
+							var w = words[word];
+							if(wordlist[w] === undefined && wordpairs[w] === true) {
+								console.log("Joined word: " + w);
+							}
+						}
 					}, group());
 				}
 			}
@@ -277,7 +275,15 @@ step(
 			);
 		}
 	}, function() {
+		for(var word in wordlist) {
+			if(!wordlist.hasOwnProperty(word)) continue;
+
+			if(wordlist[word].count == 1) {
+				delete wordlist[word];
+			}
+		}
 		console.log(Object.keys(wordlist).length + " words");
+
 		fs.exists("wordpairs", this);
 	}, function(exists) {
 		if(!exists) {
@@ -302,6 +308,6 @@ step(
 	}, function() {
 		console.log(Object.keys(wordpairs).length + " word pairs");
 		
-		//identify_typos();
+		identify_typos();
 	}
 );
