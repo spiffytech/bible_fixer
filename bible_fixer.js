@@ -5,6 +5,8 @@ var fs = require("fs");
 
 var request = require("request");
 
+var _ = require("underscore");
+
 var _s = require("underscore.string");
 
 var jQuery = require("jQuery");
@@ -35,7 +37,8 @@ if(process.argv.length > 2) {
     trans = "gwt";
 }
 
-var wordlist = {};
+var dict = {};
+var wordlist = [];
 var wordpairs = {};
 
 var bible_chapters = [
@@ -108,27 +111,6 @@ var bible_chapters = [
 ];
 
 
-var eval_word = function(word) {
-
-}
-
-
-var update_word_pairs = function(new_word) {
-	for(var word = 0; word < wordlist.length; word++) {
-		if(!wordlist.hasOwnProperty(word)) continue;
-
-		var combos = [new_word + wordlist[word], wordlist[word] + new_word, new_word + new_word];
-		for(var combo in combos) {
-			if(!combos.hasOwnProperty(combo)) continue;
-
-			if(wordpairs[combos[combo]] === undefined) {
-				wordpairs[combos[combo]] = null;
-			}
-		}
-	}
-}
-
-
 var munge_word = function(word) {
 	return word.toLowerCase().replace("’", "'", "g").replace(/'$/g, "").replace(/[^a-zA-Z0-9'-]/g, "");
 }
@@ -138,13 +120,9 @@ var count_words = function(book, chapter, verse, verse_text, cb) {
 	var words = jQuery(verse_text).find(".content").text().replace(/ {2,}/g, "").split(" ");
 	for(var word = 0; word < words.length; word++) {
 		var w = munge_word(words[word]);
-		if(wordlist[w] === undefined) {
-			wordlist[w] = {};
-			wordlist[w]["count"] = 1;
-		} else {
-			wordlist[w]["count"] += 1;
-		}
+		wordlist.push(w)
 	}
+	wordlist = _.uniq(wordlist);
 
 	cb();
 }
@@ -241,7 +219,7 @@ var identify_typos = function(cb) {
 							if(!words.hasOwnProperty(word)) continue;
 
 							var w = words[word];
-							if(wordlist[w] === undefined && wordpairs[w] === true) {
+							if(dict[w] === undefined && wordpairs[w] === true) {
 								console.log("Joined word: " + w);
 							}
 						}
@@ -249,7 +227,6 @@ var identify_typos = function(cb) {
 				}
 			}
 		}, function(err, results) {
-			fs.writeFile("wordlist", JSON.stringify(wordlist));
 			cb();
 		}
 	);
@@ -258,6 +235,13 @@ var identify_typos = function(cb) {
 
 step(
 	function() {
+		fs.readFile("words", this);
+	}, function(err, text) {
+		text = text.toString().split("\n");
+		for(var word in text) {
+			dict[text[word]] = true;
+		}
+
 		fs.exists("wordlist", this);
 	}, function(exists) {
 		if(!exists) {
@@ -275,14 +259,7 @@ step(
 			);
 		}
 	}, function() {
-		for(var word in wordlist) {
-			if(!wordlist.hasOwnProperty(word)) continue;
-
-			if(wordlist[word].count == 1) {
-				delete wordlist[word];
-			}
-		}
-		console.log(Object.keys(wordlist).length + " words");
+		console.log(wordlist.length + " words");
 
 		fs.exists("wordpairs", this);
 	}, function(exists) {

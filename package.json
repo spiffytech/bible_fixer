@@ -10,6 +10,7 @@
     "jsdom": "x.x.x",
     "xmlhttprequest": "x.x.x",
     "memoizee": "0.2.x",
+    "underscore": "x.x.x",
     "underscore.string": "2.3.x"
   },
   "devDependencies": {
