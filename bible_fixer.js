@@ -190,6 +190,13 @@ var refresh_wordlist = function(cb) {
 
 
 var generate_word_pairs = function(cb) {
+	//
+	//
+	// No more precomputing, takes too much memory. Instead, scan for this as needed.
+	// Also, make checking word existence use memoize
+	// See if I can make scanning for word combos more efficient. Some sort of startswith/endswith, maybe a variation on a heap
+	//
+	//
 	for(var word1 in wordlist) {
 		if(!wordlist.hasOwnProperty(word1)) continue;
 
