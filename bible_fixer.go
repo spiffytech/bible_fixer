@@ -90,25 +90,32 @@ func parse_file(filename string) {
     var m map[string]*json.RawMessage
     err = json.Unmarshal(b, &m)
     fmt.Println(err)
-    fmt.Println(m)
+    //fmt.Println(m)
 
     var s string
     json.Unmarshal(*m["content"], &s)
-    fmt.Println(s)
+    //fmt.Println(s)
 
     node, err := html.Parse(strings.NewReader(s))
     if err!= nil {
         panic(err)
     }
 
-    fmt.Printf("%T(%v)\n", node)
+    //fmt.Printf("%T(%v)\n", node)
     doc := gq.NewDocumentFromNode(node)
 
-    doc.Find(".verse").Each(func(i int, s *gq.Selection) {
+    verses := doc.Find(".verse")
+    num_verses := len(verses.Nodes)
+    fmt.Println("num verses = " + strconv.Itoa(num_verses))
+
+    verseChan := make(chan Verse, num_verses)
+
+    verses.Each(func(i int, s *gq.Selection) {
         //fmt.Println()
         //fmt.Println()
         //fmt.Printf("'%s'\n", s.Text())
-        if strings.TrimSpace(s.Text()) == "" {
+        if strings.TrimSpace(s.Text()) == "" {  // We get some bad HTML sometimes
+            verseChan <- Verse{}
             return
         }
 
@@ -117,9 +124,16 @@ func parse_file(filename string) {
             panic(err)
         }
 
-        verse := Verse{num: num, text: s.Text()}
-        _ = verse
-
-        fmt.Println(s.Find(".content").Text())
+        verse := Verse{num: num, text: s.Find(".content").Text()}
+        fmt.Println(verse)
+        verseChan <- verse
     })
+
+    vss := make([]Verse, 0, num_verses)
+    fmt.Printf("len vss = %d\n", len(vss))
+    for len(vss) < num_verses-1 {
+        fmt.Printf("len vss = %d\n", len(vss))
+        vss = append(vss, <-verseChan)
+        fmt.Println(vss[len(vss)-1].num)
+    }
 }
