@@ -38,9 +38,10 @@ type Verse struct {
     text string
 }
 
+var num_procs = runtime.NumCPU()
 
 func main() {
-    runtime.GOMAXPROCS(runtime.NumCPU())
+    runtime.GOMAXPROCS(num_procs)
 
     db, err := sql.Open("sqlite3", "./wordpairs.db")
     if err != nil {
@@ -107,43 +108,48 @@ func parse_file(filename string) {
 
     var wg sync.WaitGroup
     num_verses := len(verses.Nodes)
-    wg.Add(num_verses);
     fmt.Println("num verses = " + strconv.Itoa(num_verses))
 
+    versesIn := make(chan *gq.Selection)
     versesOut := make(chan Verse)
 
-    process_verse := func(i int, s *gq.Selection) {
-        defer wg.Done()
-        //fmt.Println()
-        //fmt.Println()
-        //fmt.Printf("'%s'\n", s.Text())
-        if strings.TrimSpace(s.Text()) == "" {  // We get some bad HTML sometimes, indicating an invalid verse. No further processing required.
-            return
-        }
+    wg.Add(num_procs)
+    for i := 0; i < num_procs; i++ {
+        go func() {
+            defer wg.Done()
 
-        num, err := strconv.Atoi(s.Find(".label").Text())
-        if err!= nil {
-            panic(err)
-        }
+            //fmt.Printf("'%s'\n", s.Text())
+            for s := range versesIn {
+                if strings.TrimSpace(s.Text()) == "" {  // We get some bad HTML sometimes, indicating an invalid verse. No further processing required.
+                    continue
+                }
 
-        verse := Verse{num: num, text: s.Find(".content").Text()}
-        fmt.Println(verse)
-        versesOut <- verse
-    };
-    verses.Each(func(i int, s *gq.Selection) {
-        go process_verse(i, s)
-    })
+                num, err := strconv.Atoi(s.Find(".label").Text())
+                if err!= nil {
+                    panic(err)
+                }
+
+                verse := Verse{num: num, text: s.Find(".content").Text()}
+                //fmt.Println(verse)
+                versesOut <- verse
+            }
+        }()
+    }
 
     go func() {
+        verses.Each(func(i int, s *gq.Selection) {
+            versesIn <- s
+        })
+
+        close(versesIn)
         wg.Wait()
         close(versesOut)
     }()
 
     vss := make([]Verse, 0, num_verses)
     for newVerse := range versesOut {
-        fmt.Printf("len vss = %d\n", len(vss))
         vss = append(vss, newVerse)
-        fmt.Println(vss[len(vss)-1].num)
+        fmt.Printf("len vss = %d\n", len(vss))
+        //fmt.Printf("Finished processing verse %d\n", vss[len(vss)-1].num)
     }
-    fmt.Println("here")
 }
