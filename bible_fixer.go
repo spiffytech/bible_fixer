@@ -10,6 +10,7 @@ import (
     "runtime"
     "strconv"
     "strings"
+    "sync"
     
     _ "github.com/mattn/go-sqlite3"
     "github.com/coopernurse/gorp"
@@ -85,7 +86,6 @@ func main() {
 
 func parse_file(filename string) {
     b, err := ioutil.ReadFile(filename)
-    //text := string(b)
 
     var m map[string]*json.RawMessage
     err = json.Unmarshal(b, &m)
@@ -101,21 +101,23 @@ func parse_file(filename string) {
         panic(err)
     }
 
-    //fmt.Printf("%T(%v)\n", node)
     doc := gq.NewDocumentFromNode(node)
 
     verses := doc.Find(".verse")
+
+    var wg sync.WaitGroup
     num_verses := len(verses.Nodes)
+    wg.Add(num_verses);
     fmt.Println("num verses = " + strconv.Itoa(num_verses))
 
     verseChan := make(chan Verse, num_verses)
 
-    verses.Each(func(i int, s *gq.Selection) {
+    process_verse := func(i int, s *gq.Selection) {
+        defer wg.Done()
         //fmt.Println()
         //fmt.Println()
         //fmt.Printf("'%s'\n", s.Text())
         if strings.TrimSpace(s.Text()) == "" {  // We get some bad HTML sometimes
-            verseChan <- Verse{}
             return
         }
 
@@ -127,13 +129,19 @@ func parse_file(filename string) {
         verse := Verse{num: num, text: s.Find(".content").Text()}
         fmt.Println(verse)
         verseChan <- verse
+    };
+    verses.Each(func(i int, s *gq.Selection) {
+        go process_verse(i, s)
     })
 
+    wg.Wait()
+    close(verseChan)
+
     vss := make([]Verse, 0, num_verses)
-    fmt.Printf("len vss = %d\n", len(vss))
-    for len(vss) < num_verses-1 {
+    for newVerse := range verseChan {
         fmt.Printf("len vss = %d\n", len(vss))
-        vss = append(vss, <-verseChan)
+        vss = append(vss, newVerse)
         fmt.Println(vss[len(vss)-1].num)
     }
+    fmt.Println("here")
 }
