@@ -110,14 +110,14 @@ func parse_file(filename string) {
     wg.Add(num_verses);
     fmt.Println("num verses = " + strconv.Itoa(num_verses))
 
-    verseChan := make(chan Verse, num_verses)
+    versesOut := make(chan Verse)
 
     process_verse := func(i int, s *gq.Selection) {
         defer wg.Done()
         //fmt.Println()
         //fmt.Println()
         //fmt.Printf("'%s'\n", s.Text())
-        if strings.TrimSpace(s.Text()) == "" {  // We get some bad HTML sometimes
+        if strings.TrimSpace(s.Text()) == "" {  // We get some bad HTML sometimes, indicating an invalid verse. No further processing required.
             return
         }
 
@@ -128,17 +128,19 @@ func parse_file(filename string) {
 
         verse := Verse{num: num, text: s.Find(".content").Text()}
         fmt.Println(verse)
-        verseChan <- verse
+        versesOut <- verse
     };
     verses.Each(func(i int, s *gq.Selection) {
         go process_verse(i, s)
     })
 
-    wg.Wait()
-    close(verseChan)
+    go func() {
+        wg.Wait()
+        close(versesOut)
+    }()
 
     vss := make([]Verse, 0, num_verses)
-    for newVerse := range verseChan {
+    for newVerse := range versesOut {
         fmt.Printf("len vss = %d\n", len(vss))
         vss = append(vss, newVerse)
         fmt.Println(vss[len(vss)-1].num)
