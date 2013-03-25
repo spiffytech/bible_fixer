@@ -55,6 +55,9 @@ var finalProgress = make(chan Verse)
 
 func checkIsWord(word string) (isWord bool) {
     res, found := cache.Get(word)
+    if word == "fragrancewho" {
+        fmt.Println("res, found for word %s: %s, %s\n", word, res, found)
+    }
     if !found {
         list, err := dbmap.Select(Word{}, "select * from words where word=?", word)
         if err != nil {
@@ -63,7 +66,8 @@ func checkIsWord(word string) (isWord bool) {
         isWord = len(list) != 0
         cache.Set(word, isWord, -1)
     } else {
-        isWord = res.(bool)
+        isWord = res.(bool) == true
+        fmt.Printf("Retrieving from cache: %s = %b\n", word, isWord)
     }
 
     return isWord
@@ -129,6 +133,14 @@ func main() {
 func process_verse() {
     defer wg2.Done()
 
+    //
+    //
+    // Need to start counting how often each word occurs in the Bible, so I can store those counts as replacement weights when the program finishes processing text
+    // Also, store the verse text
+    //
+    // After that's done, crank the process_verse threadcount back up
+    //
+
     for verse := range finalProgress {
         for i, word := range verse.words {
             if strings.HasSuffix(word, "'s") {
@@ -138,16 +150,17 @@ func process_verse() {
 
             isJoinedWord := false
             isWord := checkIsWord(word)
+            fmt.Printf("Word %s = %b\n", word, isWord)
             if isWord == false {
                 splitWord := strings.Split(word, "")
                 for letter := 1; letter < len(word)-1; letter++ {
                     half1 := strings.Join(splitWord[:letter], "")
                     half2 := strings.Join(splitWord[letter:], "")
-                    fmt.Println("For word " + word + ": " + half1 + ", " + half2)
+                    fmt.Println("For word " + word + ": " + half1 + ", " + half2 + " - %b", checkIsWord(half1) && checkIsWord(half2))
 
                     if checkIsWord(half1) && checkIsWord(half2) {
-                        fmt.Printf("Inserting the following words for %s: %s, %s", word, half1, half2)
-                        wordSet := &Wordset{Word: word, Word1: half1, Word2: half2, Book: verse.book, Chapter: verse.chapter, Verse: verse.num, RawWord: verse.rawWords[i]}
+                        fmt.Printf("Inserting the following words for %s: %s, %s\n", word, half1, half2)
+                        wordSet := &Wordset{Word: word, Word1: half1, Word2: half2, Book: verse.book, Chapter: verse.chapter, Verse: verse.num, RawWord: verse.rawWords[i], Text: verse.text, RawText: verse.rawText}
                         err := dbmap.Insert(wordSet)
                         if err != nil {
                             panic(err)
@@ -158,7 +171,7 @@ func process_verse() {
                     }   
 
                 }
-                if isJoinedWord == true {
+                if isJoinedWord == false {
                     fmt.Println("Adding " + word + " to the DB")
                     w := &Word{word}
                     err := dbmap.Insert(w)
