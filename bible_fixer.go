@@ -53,6 +53,22 @@ var wg2 sync.WaitGroup
 var cache = gocache.New(5*time.Hour, 30*time.Second)
 var finalProgress = make(chan Verse)
 
+func checkIsWord(word string) (isWord bool) {
+    res, found := cache.Get(word)
+    if !found {
+        list, err := dbmap.Select(Word{}, "select * from words where word=?", word)
+        if err != nil {
+            panic(err)
+        }
+        isWord = len(list) != 0
+        cache.Set(word, isWord, -1)
+    } else {
+        isWord = res.(bool)
+    }
+
+    return isWord
+}
+
 func main() {
     runtime.GOMAXPROCS(num_procs)
 
@@ -115,44 +131,32 @@ func process_verse() {
 
     for verse := range finalProgress {
         for i, word := range verse.words {
-            isJoinedWord := false
-            isWord, found := cache.Get(word)
-            if !found {
-                list, err := dbmap.Select(Word{}, "select * from words where word=?", word)
-                if err != nil {
-                    panic(err)
-                }
-                isWord = len(list) != 0
-                cache.Set(word, isWord, -1)
+            if strings.HasSuffix(word, "'s") {
+                reg := regexp.MustCompile("'s$")
+                word = reg.ReplaceAllString(word, "")
             }
 
-            if isWord  == false {
+            isJoinedWord := false
+            isWord := checkIsWord(word)
+            if isWord == false {
                 splitWord := strings.Split(word, "")
                 for letter := 1; letter < len(word)-1; letter++ {
                     half1 := strings.Join(splitWord[:letter], "")
                     half2 := strings.Join(splitWord[letter:], "")
                     fmt.Println("For word " + word + ": " + half1 + ", " + half2)
 
-                    list, err := dbmap.Select(Word{}, "select words1.w || words2.w word from (select word w from words where word like ?) words1 cross join (select word w from words where word like ?) words1 where word=?", half1 + "%", "%" + half2, word)
-                    if err != nil {
-                        panic(err)
-                    }
-
-                    if len(list) != 0 {
+                    if checkIsWord(half1) && checkIsWord(half2) {
                         fmt.Printf("Inserting the following words for %s: %s, %s", word, half1, half2)
-                        //
-                        //
-                        // Need to add verse text as well, for post-searching "which word pair is this" decision purposes
-                        // Also, this needs to be in a loop
-                        //
-                        //
                         wordSet := &Wordset{Word: word, Word1: half1, Word2: half2, Book: verse.book, Chapter: verse.chapter, Verse: verse.num, RawWord: verse.rawWords[i]}
-                        err = dbmap.Insert(wordSet)
+                        err := dbmap.Insert(wordSet)
                         if err != nil {
                             panic(err)
                         }
                         isJoinedWord = true
-                    }
+                    } else {
+                        fmt.Println("Not words")
+                    }   
+
                 }
                 if isJoinedWord == true {
                     fmt.Println("Adding " + word + " to the DB")
@@ -252,11 +256,12 @@ func parse_file(filename string) {
         close(versesOut)
     }()
 
+    wg2.Add(1)
     for verse := range versesOut {
         fmt.Printf("Processing verse %d\n", verse.num)
-        wg2.Add(1)
         finalProgress <- verse
-        //fmt.Printf("Finished processing verse %d\n", vss[len(vss)-1].num)
+        fmt.Printf("Processed verse %d\n", verse.num)
     }
+    close(finalProgress)
     wg2.Wait()
 }
