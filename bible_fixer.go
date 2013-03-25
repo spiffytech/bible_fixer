@@ -7,28 +7,32 @@ import (
     "io/ioutil"
     "log"
     "os"
+    "regexp"
     "runtime"
     "strconv"
     "strings"
     "sync"
+    "time"
     
     _ "github.com/mattn/go-sqlite3"
     "github.com/coopernurse/gorp"
     "code.google.com/p/go.net/html"
     gq "github.com/matrixik/goquery"
+    gocache "github.com/pmylund/go-cache"
 )
 
 type Word struct {
-    Word string
-}
-
-type Wordpair struct {
-    Wordpair string
+    Word string `db:"word"`
 }
 
 type Wordset struct {
-    Word *Word
-    Words string
+    RawWord string `db:"rawWord"`
+    Word string `db:"word"`
+    Word1 string `db:"word1"`
+    Word2 string `db:"word2"`
+    Book string `db:"book"`
+    Chapter int `db:"chapter"`
+    Verse int `db:"verse"`
 }
 
 type Verse struct {
@@ -36,35 +40,49 @@ type Verse struct {
     chapter int
     num int
     text string
+    rawText string
+    words []string
+    rawWords []string
 }
 
 var num_procs = runtime.NumCPU()
+var dbmap *gorp.DbMap
+var wg2 sync.WaitGroup
+var cache = gocache.New(5*time.Hour, 30*time.Second)
 
 func main() {
     runtime.GOMAXPROCS(num_procs)
 
-    db, err := sql.Open("sqlite3", "./wordpairs.db")
+    db, err := sql.Open("sqlite3", "./fixer.db")
     if err != nil {
         fmt.Println(err)
         return
     }
     defer db.Close()
 
-    dbmap := &gorp.DbMap{Db: db, Dialect: gorp.SqliteDialect{}}
-    dbmap.TraceOn("[gorp]", log.New(os.Stdout, "biblefixer:", log.Lmicroseconds))
+    dbmap = &gorp.DbMap{Db: db, Dialect: gorp.SqliteDialect{}}
+    dbmap.TraceOn("[gorp]", log.New(os.Stdout, "", log.Lmicroseconds))
     wdb := dbmap.AddTableWithName(Word{}, "words")
     _ = wdb
-    wpdb := dbmap.AddTableWithName(Wordpair{}, "wordpairs")
-    _ = wpdb
+
     wsdb := dbmap.AddTableWithName(Wordset{}, "wordsets")
     _ = wsdb
-    dbmap.CreateTables()
+
+    err = dbmap.CreateTables()
+    fmt.Println(err)
+    //if err != nil { 
+    //    panic(err)
+    //}
+
+    dbmap.Exec("create index if not exists wordsIndex on words (word)")
 
     b, err := ioutil.ReadFile("words")
-    if err != nil { panic(err) }
+    if err != nil { 
+        panic(err)
+    }
     words := strings.Fields(string(b))
 
-    row := db.QueryRow("select count(*) c from word")
+    row := db.QueryRow("select count(*) c from words")
     var c int
     err = row.Scan(&c)
     if err != nil {
@@ -78,11 +96,62 @@ func main() {
             fmt.Println(word)
             w := &Word{word}
             err := dbmap.Insert(w)
-            fmt.Println(err)
+            if err != nil {
+                panic(err)
+            }
         }
     }
 
     parse_file("trans/gwt/2COR.2.gwt");
+}
+
+func process_verse(verse Verse) {
+    defer wg2.Done()
+    for i, word := range verse.words {
+        isJoinedWord := false
+        isWord, found := cache.Get(word)
+        if !found {
+            list, err := dbmap.Select(Word{}, "select * from words where word=?", word)
+            if err != nil {
+                panic(err)
+            }
+            isWord = len(list) != 0
+            cache.Set(word, isWord, -1)
+        }
+
+        if isWord  == false {
+            splitWord := strings.Split(word, "")
+            for letter := 1; letter < len(word)-1; letter++ {
+                half1 := strings.Join(splitWord[:letter], "")
+                half2 := strings.Join(splitWord[letter:], "")
+                fmt.Println("For word " + word + ": " + half1 + ", " + half2)
+
+                list, err := dbmap.Select(Word{}, "select words1.w || words2.w word from (select word w from words where word like ?) words1 cross join (select word w from words where word like ?) words2 where word=?", half1 + "%", "%" + half2, word)
+                if err != nil {
+                    panic(err)
+                }
+
+                if len(list) != 0 {
+                    fmt.Printf("Inserting the following words for %s: %s, %s", word, half1, half2)
+                    wordSet := &Wordset{Word: word, Word1: half1, Word2: half2, Book: verse.book, Chapter: verse.chapter, Verse: verse.num, RawWord: verse.rawWords[i]}
+                    err = dbmap.Insert(wordSet)
+                    if err != nil {
+                        panic(err)
+                    }
+                    isJoinedWord = true
+                }
+            }
+            if isJoinedWord == true {
+                fmt.Println("Adding " + word + " to the DB")
+                w := &Word{word}
+                err := dbmap.Insert(w)
+                if err != nil {
+                    panic(err)
+                }
+                cache.Set(word, true, -1)
+            }
+        }
+    }
 }
 
 func parse_file(filename string) {
@@ -98,7 +167,7 @@ func parse_file(filename string) {
     //fmt.Println(s)
 
     node, err := html.Parse(strings.NewReader(s))
-    if err!= nil {
+    if err != nil {
         panic(err)
     }
 
@@ -124,12 +193,35 @@ func parse_file(filename string) {
                     continue
                 }
 
+                verse := Verse{}
+
                 num, err := strconv.Atoi(s.Find(".label").Text())
                 if err!= nil {
                     panic(err)
                 }
+                verse.num = num
 
-                verse := Verse{num: num, text: s.Find(".content").Text()}
+                text := s.Find(".content").Text()
+
+                reg := regexp.MustCompile(" {2,}")
+                text = reg.ReplaceAllString(text, " ")
+
+                verse.rawText = text
+                verse.rawWords = strings.Fields(text)
+
+                text = strings.ToLower(text)
+
+                text = strings.Replace(text, "’", "'", -1)
+
+                reg = regexp.MustCompile("'$")
+                text = reg.ReplaceAllString(text, "")
+
+                reg = regexp.MustCompile("[^a-zA-Z0-9' -]")
+                text = reg.ReplaceAllString(text, "")
+
+                verse.text = text
+                verse.words = strings.Fields(text)
+
                 //fmt.Println(verse)
                 versesOut <- verse
             }
@@ -146,10 +238,11 @@ func parse_file(filename string) {
         close(versesOut)
     }()
 
-    vss := make([]Verse, 0, num_verses)
-    for newVerse := range versesOut {
-        vss = append(vss, newVerse)
-        fmt.Printf("len vss = %d\n", len(vss))
+    for verse := range versesOut {
+        fmt.Printf("Processing verse %d\n", verse.num)
+        wg2.Add(1)
+        go process_verse(verse)
         //fmt.Printf("Finished processing verse %d\n", vss[len(vss)-1].num)
     }
+    wg2.Wait()
 }
