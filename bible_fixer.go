@@ -7,6 +7,7 @@ import (
     "io/ioutil"
     "log"
     "os"
+    "path"
     "regexp"
     "runtime"
     "strconv"
@@ -23,6 +24,7 @@ import (
 
 type Word struct {
     Word string `db:"word"`
+    Count int `db:"wordcount"`
 }
 
 type Wordset struct {
@@ -51,14 +53,15 @@ var num_procs = runtime.NumCPU()
 var dbmap *gorp.DbMap
 var wg2 sync.WaitGroup
 var cache = gocache.New(5*time.Hour, 30*time.Second)
+var wordCounts = gocache.New(5*time.Hour, 30*time.Second)
 var finalProgress = make(chan Verse)
+var numVerseWorkers = 1
+var numChapterWorkers = 1
 
 func checkIsWord(word string) (isWord bool) {
     res, found := cache.Get(word)
-    if word == "fragrancewho" {
-        fmt.Println("res, found for word %s: %s, %s\n", word, res, found)
-    }
     if !found {
+        fmt.Printf("Inserting %s into cache\n", word)
         list, err := dbmap.Select(Word{}, "select * from words where word=?", word)
         if err != nil {
             panic(err)
@@ -85,7 +88,7 @@ func main() {
 
     dbmap = &gorp.DbMap{Db: db, Dialect: gorp.SqliteDialect{}}
     dbmap.TraceOn("[gorp]", log.New(os.Stdout, "", log.Lmicroseconds))
-    wdb := dbmap.AddTableWithName(Word{}, "words")
+    wdb := dbmap.AddTableWithName(Word{}, "words").SetKeys(false, "word")
     _ = wdb
 
     wsdb := dbmap.AddTableWithName(Wordset{}, "wordsets")
@@ -97,7 +100,9 @@ func main() {
     //    panic(err)
     //}
 
-    dbmap.Exec("create index if not exists wordsIndex on words (word)")
+    dbmap.Exec("create index if not exists wordsIndex on words (word COLLATE NOCASE)")
+    dbmap.Exec("delete from wordsets where 1=1")
+    dbmap.Exec("update words set wordcount=0")
 
     b, err := ioutil.ReadFile("words")
     if err != nil { 
@@ -114,12 +119,14 @@ func main() {
     }
     fmt.Println(c)
 
-    go process_verse()
+    for i := 0; i < numVerseWorkers; i++ {
+        go process_verse()
+    }
 
     if c == 0 {
         for _, word := range words {
             fmt.Println(word)
-            w := &Word{word}
+            w := &Word{Word: word, Count: 0}
             err := dbmap.Insert(w)
             if err != nil {
                 panic(err)
@@ -127,21 +134,24 @@ func main() {
         }
     }
 
-    parse_file("trans/gwt/2COR.2.gwt");
+    dir := "./trans/gwt"
+    files, _ := ioutil.ReadDir(dir)
+    for _, filename := range files {
+        path := path.Join(dir, filename.Name())
+        parse_file(path);
+    }
+    //_ = path.Join
+    //_ = files
+    //parse_file("trans/gwt/2COR.2.gwt");
 }
 
 func process_verse() {
     defer wg2.Done()
 
-    //
-    //
-    // Need to start counting how often each word occurs in the Bible, so I can store those counts as replacement weights when the program finishes processing text
-    // Also, store the verse text
-    //
-    // After that's done, crank the process_verse threadcount back up
-    //
-
     for verse := range finalProgress {
+        var isWord bool
+        var err error
+
         for i, word := range verse.words {
             if strings.HasSuffix(word, "'s") {
                 reg := regexp.MustCompile("'s$")
@@ -149,7 +159,7 @@ func process_verse() {
             }
 
             isJoinedWord := false
-            isWord := checkIsWord(word)
+            isWord = checkIsWord(word)
             fmt.Printf("Word %s = %b\n", word, isWord)
             if isWord == false {
                 splitWord := strings.Split(word, "")
@@ -161,7 +171,7 @@ func process_verse() {
                     if checkIsWord(half1) && checkIsWord(half2) {
                         fmt.Printf("Inserting the following words for %s: %s, %s\n", word, half1, half2)
                         wordSet := &Wordset{Word: word, Word1: half1, Word2: half2, Book: verse.book, Chapter: verse.chapter, Verse: verse.num, RawWord: verse.rawWords[i], Text: verse.text, RawText: verse.rawText}
-                        err := dbmap.Insert(wordSet)
+                        err = dbmap.Insert(wordSet)
                         if err != nil {
                             panic(err)
                         }
@@ -173,13 +183,21 @@ func process_verse() {
                 }
                 if isJoinedWord == false {
                     fmt.Println("Adding " + word + " to the DB")
-                    w := &Word{word}
+                    w := &Word{Word: word, Count: 0}
+                    fmt.Println(w)
                     err := dbmap.Insert(w)
                     if err != nil {
+                        fmt.Println("OH NOES!")
                         panic(err)
                     }
                     cache.Set(word, true, -1)
+                    isWord = true
                 }
+            }
+
+            err = wordCounts.Increment(word, 1)
+            if err != nil {
+                wordCounts.Set(word, 1, -1)
             }
         }
     }
@@ -213,8 +231,8 @@ func parse_file(filename string) {
     versesIn := make(chan *gq.Selection)
     versesOut := make(chan Verse)
 
-    wg.Add(num_procs)
-    for i := 0; i < num_procs; i++ {
+    wg.Add(numChapterWorkers)
+    for i := 0; i < numChapterWorkers; i++ {
         go func() {
             defer wg.Done()
 
@@ -269,7 +287,7 @@ func parse_file(filename string) {
         close(versesOut)
     }()
 
-    wg2.Add(1)
+    wg2.Add(numChapterWorkers)
     for verse := range versesOut {
         fmt.Printf("Processing verse %d\n", verse.num)
         finalProgress <- verse
@@ -277,4 +295,18 @@ func parse_file(filename string) {
     }
     close(finalProgress)
     wg2.Wait()
+
+    list, err := dbmap.Select(Word{}, "select word from words")
+    for _, word := range list {
+        word := word.(*Word)
+        res, found := wordCounts.Get(word.Word)
+        if found {
+            word.Count = res.(int)
+            _, err = dbmap.Update(word)
+            if err != nil {
+                panic(err)
+            }
+        }
+    }
+    dbmap.Exec("delete from wordsets where (select wordcount from words where word=word) >= 5")
 }
