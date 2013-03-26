@@ -39,6 +39,12 @@ type Wordset struct {
     RawText string `db:"rawText"`
 }
 
+type Chapter struct {
+    book string
+    chapter int
+    path string
+}
+
 type Verse struct {
     book string
     chapter int
@@ -47,21 +53,37 @@ type Verse struct {
     rawText string
     words []string
     rawWords []string
+    html *gq.Selection
+}
+
+type Error struct {
+    Msg string
+}
+
+func (e *Error) Error() string {
+    return e.Msg
 }
 
 var num_procs = runtime.NumCPU()
 var dbmap *gorp.DbMap
-var wg2 sync.WaitGroup
+var verseWg sync.WaitGroup
+var rawVerseWg sync.WaitGroup
+var chapterWg sync.WaitGroup
 var cache = gocache.New(5*time.Hour, 30*time.Second)
 var wordCounts = gocache.New(5*time.Hour, 30*time.Second)
-var finalProgress = make(chan Verse)
-var numVerseWorkers = 1
-var numChapterWorkers = 1
+var chaptersIn = make(chan Chapter)
+var chaptersOut = make(chan Verse)
+var versesIn = make(chan Verse)
+var versesOut = make(chan Verse)
+var rawVersesIn = make(chan Verse)
+var rawVersesOut = make(chan Verse)
+var numRawVerseWorkers = num_procs
+var numVerseWorkers = num_procs
+var numChapterWorkers = num_procs
 
 func checkIsWord(word string) (isWord bool) {
     res, found := cache.Get(word)
     if !found {
-        fmt.Printf("Inserting %s into cache\n", word)
         list, err := dbmap.Select(Word{}, "select * from words where word=?", word)
         if err != nil {
             panic(err)
@@ -70,7 +92,6 @@ func checkIsWord(word string) (isWord bool) {
         cache.Set(word, isWord, -1)
     } else {
         isWord = res.(bool) == true
-        fmt.Printf("Retrieving from cache: %s = %b\n", word, isWord)
     }
 
     return isWord
@@ -119,10 +140,6 @@ func main() {
     }
     fmt.Println(c)
 
-    for i := 0; i < numVerseWorkers; i++ {
-        go process_verse()
-    }
-
     if c == 0 {
         for _, word := range words {
             fmt.Println(word)
@@ -134,21 +151,160 @@ func main() {
         }
     }
 
+    rawVerseWg.Add(numRawVerseWorkers)
+    for i := 0; i < numChapterWorkers; i++ {
+        go processRawVerse();
+    verseWg.Add(numVerseWorkers)
+    for i := 0; i < numVerseWorkers; i++ {
+        go process_verse()
+    }
+    chapterWg.Add(numChapterWorkers)
+    for i := 0; i < numChapterWorkers; i++ {
+        go parseChapter();
+    }
+    }
+
+    go func() {
+        for verse := range chaptersOut {
+            rawVersesIn <- verse
+        }
+        close(rawVersesIn)
+        rawVerseWg.Wait()
+        close(rawVersesOut)
+    }()
+    go func() {
+        for verse := range rawVersesOut {
+            versesIn <- verse
+        }
+        close(versesIn)
+        verseWg.Wait()
+        close(versesOut)
+    }()
+    go func() {
+        for verse := range versesOut {
+            _ = verse
+        }
+    }()
+
     dir := "./trans/gwt"
     files, _ := ioutil.ReadDir(dir)
     for _, filename := range files {
+        if filename.Name() != "2COR.2.gwt" {
+            continue
+        }
+
         path := path.Join(dir, filename.Name())
-        parse_file(path);
+
+        regex := regexp.MustCompile(`(?P<book>\S+)\.(?P<chapter>\d+).gwt`)
+        matches := regex.FindStringSubmatch(filename.Name())
+        bookName := matches[1]
+        chapterNum, err := strconv.Atoi(matches[2])
+        if err!= nil {
+            panic(err)
+        }
+
+        chapter := Chapter{book: bookName, chapter: chapterNum, path: path}
+        chaptersIn <- chapter
+        //_ = path.Join
+        //_ = files
+        //parseChapter("trans/gwt/2COR.2.gwt");
     }
-    //_ = path.Join
-    //_ = files
-    //parse_file("trans/gwt/2COR.2.gwt");
+    close(chaptersIn)
+    chapterWg.Wait()
+    close(chaptersOut)
 }
 
-func process_verse() {
-    defer wg2.Done()
 
-    for verse := range finalProgress {
+func parseChapter() {
+    defer chapterWg.Done()
+
+    for chapter := range chaptersIn {
+        filename := chapter.path
+        b, err := ioutil.ReadFile(filename)
+
+        var m map[string]*json.RawMessage
+        err = json.Unmarshal(b, &m)
+        fmt.Println(err)
+        //fmt.Println(m)
+
+        var s string
+        json.Unmarshal(*m["content"], &s)
+        //fmt.Println(s)
+
+        node, err := html.Parse(strings.NewReader(s))
+        if err != nil {
+            panic(err)
+        }
+
+        doc := gq.NewDocumentFromNode(node)
+        verses := doc.Find(".verse")
+        verses.Each(func(i int, s *gq.Selection) {
+            chaptersOut <- Verse{book: chapter.book, chapter: chapter.chapter, html: s}
+        })
+
+        list, err := dbmap.Select(Word{}, "select word from words")
+        for _, word := range list {
+            word := word.(*Word)
+            res, found := wordCounts.Get(word.Word)
+            if found {
+                word.Count = res.(int)
+                _, err = dbmap.Update(word)
+                if err != nil {
+                    panic(err)
+                }
+            }
+        }
+        dbmap.Exec("delete from wordsets where (select wordcount from words where word=word) >= 5")
+    }
+}
+
+
+func processRawVerse() {
+    defer rawVerseWg.Done()
+
+    for verse := range rawVersesIn {
+        s := verse.html
+
+        if strings.TrimSpace(s.Text()) == "" {  // We get some bad HTML sometimes, indicating an invalid verse. No further processing required.
+            continue
+        }
+
+        num, err := strconv.Atoi(s.Find(".label").Text())
+        if err!= nil {
+            panic(err)
+        }
+        verse.num = num
+
+        text := s.Find(".content").Text()
+
+        reg := regexp.MustCompile(" {2,}")
+        text = reg.ReplaceAllString(text, " ")
+
+        verse.rawText = text
+        verse.rawWords = strings.Fields(text)
+
+        text = strings.ToLower(text)
+
+        text = strings.Replace(text, "’", "'", -1)
+
+        reg = regexp.MustCompile("'$")
+        text = reg.ReplaceAllString(text, "")
+
+        reg = regexp.MustCompile("[^a-zA-Z0-9' -]")
+        text = reg.ReplaceAllString(text, "")
+
+        verse.text = text
+        verse.words = strings.Fields(text)
+
+        rawVersesOut <- verse
+    }
+}
+
+
+func process_verse() {
+    defer verseWg.Done()
+
+    for verse := range versesIn {
         var isWord bool
         var err error
 
@@ -160,13 +316,11 @@ func process_verse() {
 
             isJoinedWord := false
             isWord = checkIsWord(word)
-            fmt.Printf("Word %s = %b\n", word, isWord)
             if isWord == false {
                 splitWord := strings.Split(word, "")
                 for letter := 1; letter < len(word)-1; letter++ {
                     half1 := strings.Join(splitWord[:letter], "")
                     half2 := strings.Join(splitWord[letter:], "")
-                    fmt.Println("For word " + word + ": " + half1 + ", " + half2 + " - %b", checkIsWord(half1) && checkIsWord(half2))
 
                     if checkIsWord(half1) && checkIsWord(half2) {
                         fmt.Printf("Inserting the following words for %s: %s, %s\n", word, half1, half2)
@@ -176,8 +330,6 @@ func process_verse() {
                             panic(err)
                         }
                         isJoinedWord = true
-                    } else {
-                        fmt.Println("Not words")
                     }   
 
                 }
@@ -187,7 +339,6 @@ func process_verse() {
                     fmt.Println(w)
                     err := dbmap.Insert(w)
                     if err != nil {
-                        fmt.Println("OH NOES!")
                         panic(err)
                     }
                     cache.Set(word, true, -1)
@@ -200,113 +351,7 @@ func process_verse() {
                 wordCounts.Set(word, 1, -1)
             }
         }
+
+        versesOut <- verse
     }
-}
-
-func parse_file(filename string) {
-    b, err := ioutil.ReadFile(filename)
-
-    var m map[string]*json.RawMessage
-    err = json.Unmarshal(b, &m)
-    fmt.Println(err)
-    //fmt.Println(m)
-
-    var s string
-    json.Unmarshal(*m["content"], &s)
-    //fmt.Println(s)
-
-    node, err := html.Parse(strings.NewReader(s))
-    if err != nil {
-        panic(err)
-    }
-
-    doc := gq.NewDocumentFromNode(node)
-
-    verses := doc.Find(".verse")
-
-    var wg sync.WaitGroup
-    num_verses := len(verses.Nodes)
-    fmt.Println("num verses = " + strconv.Itoa(num_verses))
-
-    versesIn := make(chan *gq.Selection)
-    versesOut := make(chan Verse)
-
-    wg.Add(numChapterWorkers)
-    for i := 0; i < numChapterWorkers; i++ {
-        go func() {
-            defer wg.Done()
-
-            //fmt.Printf("'%s'\n", s.Text())
-            for s := range versesIn {
-                if strings.TrimSpace(s.Text()) == "" {  // We get some bad HTML sometimes, indicating an invalid verse. No further processing required.
-                    continue
-                }
-
-                verse := Verse{}
-
-                num, err := strconv.Atoi(s.Find(".label").Text())
-                if err!= nil {
-                    panic(err)
-                }
-                verse.num = num
-
-                text := s.Find(".content").Text()
-
-                reg := regexp.MustCompile(" {2,}")
-                text = reg.ReplaceAllString(text, " ")
-
-                verse.rawText = text
-                verse.rawWords = strings.Fields(text)
-
-                text = strings.ToLower(text)
-
-                text = strings.Replace(text, "’", "'", -1)
-
-                reg = regexp.MustCompile("'$")
-                text = reg.ReplaceAllString(text, "")
-
-                reg = regexp.MustCompile("[^a-zA-Z0-9' -]")
-                text = reg.ReplaceAllString(text, "")
-
-                verse.text = text
-                verse.words = strings.Fields(text)
-
-                //fmt.Println(verse)
-                versesOut <- verse
-            }
-        }()
-    }
-
-    go func() {
-        verses.Each(func(i int, s *gq.Selection) {
-            versesIn <- s
-        })
-
-        close(versesIn)
-        wg.Wait()
-        close(versesOut)
-    }()
-
-    wg2.Add(numChapterWorkers)
-    for verse := range versesOut {
-        fmt.Printf("Processing verse %d\n", verse.num)
-        finalProgress <- verse
-        fmt.Printf("Processed verse %d\n", verse.num)
-    }
-    close(finalProgress)
-    wg2.Wait()
-
-    list, err := dbmap.Select(Word{}, "select word from words")
-    for _, word := range list {
-        word := word.(*Word)
-        res, found := wordCounts.Get(word.Word)
-        if found {
-            word.Count = res.(int)
-            _, err = dbmap.Update(word)
-            if err != nil {
-                panic(err)
-            }
-        }
-    }
-    dbmap.Exec("delete from wordsets where (select wordcount from words where word=word) >= 5")
 }
