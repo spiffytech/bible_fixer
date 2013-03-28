@@ -81,26 +81,10 @@ var numRawVerseWorkers = num_procs
 var numVerseWorkers = num_procs
 var numChapterWorkers = num_procs
 
-func checkIsWord(word string) (isWord bool) {
-    res, found := cache.Get(word)
-    if !found {
-        list, err := dbmap.Select(Word{}, "select * from words where word=?", word)
-        if err != nil {
-            panic(err)
-        }
-        isWord = len(list) != 0
-        cache.Set(word, isWord, -1)
-    } else {
-        isWord = res.(bool) == true
-    }
-
-    return isWord
-}
-
 func main() {
     runtime.GOMAXPROCS(num_procs)
 
-    db, err := sql.Open("sqlite3", "./fixer.db")
+    db, err := sql.Open("sqlite3", "file:./fixer.db?cache=shared&mode=rwc")
     if err != nil {
         fmt.Println(err)
         return
@@ -142,26 +126,37 @@ func main() {
 
     if c == 0 {
         for _, word := range words {
-            fmt.Println(word)
-            w := &Word{Word: word, Count: 0}
-            err := dbmap.Insert(w)
-            if err != nil {
-                panic(err)
+            word = strings.ToLower(word)
+            _, found := cache.Get(word)
+            if !found {
+                fmt.Println(word)
+                w := &Word{Word: word, Count: 0}
+                for {
+                    err := dbmap.Insert(w)
+                    if err == nil {
+                        break
+                    }
+                    if !strings.HasPrefix(err.Error(), "database table is locked") {
+                        panic(err)
+                    }
+                    fmt.Println("Waiting for write lock...")
+                }
+                cache.Set(word, true, -1)
             }
         }
     }
 
-    rawVerseWg.Add(numRawVerseWorkers)
-    for i := 0; i < numChapterWorkers; i++ {
-        go processRawVerse();
-    verseWg.Add(numVerseWorkers)
-    for i := 0; i < numVerseWorkers; i++ {
-        go process_verse()
-    }
     chapterWg.Add(numChapterWorkers)
     for i := 0; i < numChapterWorkers; i++ {
         go parseChapter();
     }
+    rawVerseWg.Add(numRawVerseWorkers)
+    for i := 0; i < numChapterWorkers; i++ {
+        go processRawVerse();
+    }
+    verseWg.Add(numVerseWorkers)
+    for i := 0; i < numVerseWorkers; i++ {
+        go progessVerse()
     }
 
     go func() {
@@ -190,7 +185,7 @@ func main() {
     files, _ := ioutil.ReadDir(dir)
     for _, filename := range files {
         if filename.Name() != "2COR.2.gwt" {
-            continue
+            //continue
         }
 
         path := path.Join(dir, filename.Name())
@@ -212,6 +207,23 @@ func main() {
     close(chaptersIn)
     chapterWg.Wait()
     close(chaptersOut)
+}
+
+
+func checkIsWord(word string) (isWord bool) {
+    res, found := cache.Get(word)
+    if !found {
+        list, err := dbmap.Select(Word{}, "select * from words where word=?", word)
+        if err != nil {
+            panic(err)
+        }
+        isWord = len(list) != 0
+        cache.Set(word, isWord, -1)
+    } else {
+        isWord = res.(bool) == true
+    }
+
+    return isWord
 }
 
 
@@ -248,13 +260,18 @@ func parseChapter() {
             res, found := wordCounts.Get(word.Word)
             if found {
                 word.Count = res.(int)
-                _, err = dbmap.Update(word)
-                if err != nil {
-                    panic(err)
+                for err != nil {
+                    _, err = dbmap.Update(word)
+                    if err == nil {
+                        break
+                    }
+                    if !strings.HasPrefix(err.Error(), "database table is locked") {
+                        panic(err)
+                    }
+                    fmt.Println("Waiting for write lock...")
                 }
             }
         }
-        dbmap.Exec("delete from wordsets where (select wordcount from words where word=word) >= 5")
     }
 }
 
@@ -293,6 +310,8 @@ func processRawVerse() {
         reg = regexp.MustCompile("[^a-zA-Z0-9' -]")
         text = reg.ReplaceAllString(text, "")
 
+        text = strings.TrimSpace(text)
+
         verse.text = text
         verse.words = strings.Fields(text)
 
@@ -301,7 +320,7 @@ func processRawVerse() {
 }
 
 
-func process_verse() {
+func progessVerse() {
     defer verseWg.Done()
 
     for verse := range versesIn {
@@ -309,6 +328,11 @@ func process_verse() {
         var err error
 
         for i, word := range verse.words {
+            regex := regexp.MustCompile("(^[A-Z]|^[0-9]+$|arand)")
+            if regex.MatchString(word) {
+                continue
+            }
+
             if strings.HasSuffix(word, "'s") {
                 reg := regexp.MustCompile("'s$")
                 word = reg.ReplaceAllString(word, "")
@@ -335,11 +359,20 @@ func process_verse() {
                 }
                 if isJoinedWord == false {
                     fmt.Println("Adding " + word + " to the DB")
-                    w := &Word{Word: word, Count: 0}
+                    w := &Word{Word: word, Count: 1}
                     fmt.Println(w)
-                    err := dbmap.Insert(w)
-                    if err != nil {
-                        panic(err)
+                    for err != nil {
+                        err := dbmap.Insert(w)
+                        if err == nil {
+                            break
+                        }
+                        if strings.HasPrefix(err.Error(), "column word is not unique") {
+                            break
+                        }
+                        if !strings.HasPrefix(err.Error(), "database table is locked") {
+                            panic(err)
+                        }
+                        fmt.Println("Waiting for write lock...")
                     }
                     cache.Set(word, true, -1)
                     isWord = true
