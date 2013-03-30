@@ -99,6 +99,8 @@ func main() {
     wsdb := dbmap.AddTableWithName(Wordset{}, "wordsets")
     _ = wsdb
 
+    // PostgreSQL 9.1 introduces "create if not exists". I'm on 8.4 :(
+    // Using this instead of CreatTables() begause gorp doesn't presently support 'text' column types
     _, err = dbmap.Exec("create table wordsets ( " + 
             "rawword character varying(255), " +
             "word character varying(255), " +
@@ -136,7 +138,7 @@ func main() {
     if c == 0 {
         for _, word := range words {
             word = strings.ToLower(word)
-            _, found := cache.Get(word)
+            _, found := cache.Get(word)  // Lowercased words result in duplicates that violate the primary key restraint
             if !found {
                 fmt.Println(word)
                 w := &Word{Word: word, Count: 0}
@@ -146,6 +148,12 @@ func main() {
                 }
                 cache.Set(word, true, -1)
             }
+        }
+    } else {
+        list, _ := dbmap.Select(Word{}, "select word from words")
+        for _, word := range list {
+            word := word.(*Word)
+            cache.Set(word.Word, true, -1)
         }
     }
 
@@ -329,7 +337,7 @@ func progessVerse() {
         var err error
 
         regex1 := regexp.MustCompile("^[A-Z]")
-        regex2 := regexp.MustCompile("(^[0-9]+$|arand)")
+        regex2 := regexp.MustCompile("(^[0-9]+$|arand|nebat)")
         for i, word := range verse.words {
             if regex1.MatchString(verse.rawWords[i]) {
                 continue
