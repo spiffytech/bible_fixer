@@ -15,7 +15,7 @@ import (
     "sync"
     "time"
     
-    _ "github.com/mattn/go-sqlite3"
+     _ "github.com/bmizerany/pq"
     "github.com/coopernurse/gorp"
     "code.google.com/p/go.net/html"
     gq "github.com/matrixik/goquery"
@@ -84,14 +84,14 @@ var numChapterWorkers = num_procs
 func main() {
     runtime.GOMAXPROCS(num_procs)
 
-    db, err := sql.Open("sqlite3", "file:./fixer.db?cache=shared&mode=rwc")
+    db, err := sql.Open("postgres", "user=postgres password=postgres dbname=biblefixer")
     if err != nil {
         fmt.Println(err)
         return
     }
     defer db.Close()
 
-    dbmap = &gorp.DbMap{Db: db, Dialect: gorp.SqliteDialect{}}
+    dbmap = &gorp.DbMap{Db: db, Dialect: gorp.PostgresDialect{}}
     dbmap.TraceOn("[gorp]", log.New(os.Stdout, "", log.Lmicroseconds))
     wdb := dbmap.AddTableWithName(Word{}, "words").SetKeys(false, "word")
     _ = wdb
@@ -99,15 +99,24 @@ func main() {
     wsdb := dbmap.AddTableWithName(Wordset{}, "wordsets")
     _ = wsdb
 
+    _, err = dbmap.Exec("create table wordsets ( " + 
+            "rawword character varying(255), " +
+            "word character varying(255), " +
+            "word1 character varying(255), " +
+            "word2 character varying(255), " +
+            "book character varying(255), " +
+            "chapter integer, " +
+            "verse integer, " +
+            "text text, " +
+            "rawtext text " +
+        ");")
+    // Don't actually handle the error, it's *usually* just "table already exists", which doesn't matter.
+    fmt.Println(err)
     err = dbmap.CreateTables()
     fmt.Println(err)
     //if err != nil { 
     //    panic(err)
     //}
-
-    dbmap.Exec("create index if not exists wordsIndex on words (word COLLATE NOCASE)")
-    dbmap.Exec("delete from wordsets where 1=1")
-    dbmap.Exec("update words set wordcount=0")
 
     b, err := ioutil.ReadFile("words")
     if err != nil { 
@@ -131,20 +140,18 @@ func main() {
             if !found {
                 fmt.Println(word)
                 w := &Word{Word: word, Count: 0}
-                for {
-                    err := dbmap.Insert(w)
-                    if err == nil {
-                        break
-                    }
-                    if !strings.HasPrefix(err.Error(), "database table is locked") {
-                        panic(err)
-                    }
-                    fmt.Println("Waiting for write lock...")
+                err := dbmap.Insert(w)
+                if err != nil {
+                    panic(err)
                 }
                 cache.Set(word, true, -1)
             }
         }
     }
+
+    dbmap.Exec("create index if not exists wordsindex on words (lower(word));")
+    dbmap.Exec("delete from wordsets where 1=1")
+    dbmap.Exec("update words set wordcount=0")
 
     chapterWg.Add(numChapterWorkers)
     for i := 0; i < numChapterWorkers; i++ {
@@ -207,13 +214,26 @@ func main() {
     close(chaptersIn)
     chapterWg.Wait()
     close(chaptersOut)
+
+    list, err := dbmap.Select(Word{}, "select word from words")
+    for _, word := range list {
+        word := word.(*Word)
+        res, found := wordCounts.Get(word.Word)
+        if found {
+            word.Count = res.(int)
+            _, err = dbmap.Update(word)
+            if err != nil {
+                panic(err)
+            }
+        }
+    }
 }
 
 
 func checkIsWord(word string) (isWord bool) {
     res, found := cache.Get(word)
     if !found {
-        list, err := dbmap.Select(Word{}, "select * from words where word=?", word)
+        list, err := dbmap.Select(Word{}, "select * from words where word=$1", word)
         if err != nil {
             panic(err)
         }
@@ -253,25 +273,6 @@ func parseChapter() {
         verses.Each(func(i int, s *gq.Selection) {
             chaptersOut <- Verse{book: chapter.book, chapter: chapter.chapter, html: s}
         })
-
-        list, err := dbmap.Select(Word{}, "select word from words")
-        for _, word := range list {
-            word := word.(*Word)
-            res, found := wordCounts.Get(word.Word)
-            if found {
-                word.Count = res.(int)
-                for err != nil {
-                    _, err = dbmap.Update(word)
-                    if err == nil {
-                        break
-                    }
-                    if !strings.HasPrefix(err.Error(), "database table is locked") {
-                        panic(err)
-                    }
-                    fmt.Println("Waiting for write lock...")
-                }
-            }
-        }
     }
 }
 
@@ -327,9 +328,13 @@ func progessVerse() {
         var isWord bool
         var err error
 
+        regex1 := regexp.MustCompile("^[A-Z]")
+        regex2 := regexp.MustCompile("(^[0-9]+$|arand)")
         for i, word := range verse.words {
-            regex := regexp.MustCompile("(^[A-Z]|^[0-9]+$|arand)")
-            if regex.MatchString(verse.rawWords[i]) {
+            if regex1.MatchString(verse.rawWords[i]) {
+                continue
+            }
+            if regex2.MatchString(verse.words[i]) {
                 continue
             }
 
@@ -361,18 +366,9 @@ func progessVerse() {
                     fmt.Println("Adding " + word + " to the DB")
                     w := &Word{Word: word, Count: 1}
                     fmt.Println(w)
-                    for err != nil {
-                        err := dbmap.Insert(w)
-                        if err == nil {
-                            break
-                        }
-                        if strings.HasPrefix(err.Error(), "column word is not unique") {
-                            break
-                        }
-                        if !strings.HasPrefix(err.Error(), "database table is locked") {
-                            panic(err)
-                        }
-                        fmt.Println("Waiting for write lock...")
+                    err := dbmap.Insert(w)
+                    if err != nil {
+                        panic(err)
                     }
                     cache.Set(word, true, -1)
                     isWord = true
