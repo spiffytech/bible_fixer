@@ -329,7 +329,7 @@ func progessVerse() {
 
         for i, word := range verse.words {
             regex := regexp.MustCompile("(^[A-Z]|^[0-9]+$|arand)")
-            if regex.MatchString(word) {
+            if regex.MatchString(verse.rawWords[i]) {
                 continue
             }
 
