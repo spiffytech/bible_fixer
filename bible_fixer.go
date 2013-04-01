@@ -4,6 +4,7 @@ import (
     "database/sql"
     "encoding/json"
     "encoding/csv"
+    "flag"
     "fmt"
     "io/ioutil"
     "log"
@@ -66,6 +67,7 @@ func (e *Error) Error() string {
     return e.Msg
 }
 
+var debug bool
 var num_procs = runtime.NumCPU()
 var dbmap *gorp.DbMap
 
@@ -90,15 +92,28 @@ var numChapterWorkers = num_procs
 func main() {
     runtime.GOMAXPROCS(num_procs)
 
+    flag.BoolVar(&debug, "debug", false, "Print extra output for debugging purposes")
+
+    flag.Parse()
+
+    args := flag.Args()
+    if len(args) == 0 {
+        panic("You must specify a directory that contains your Bible text files")
+    }
+    dir := args[0]
+
     db, err := sql.Open("postgres", "user=postgres password=postgres dbname=biblefixer")
     if err != nil {
-        fmt.Println(err)
-        return
+        panic(err)
     }
     defer db.Close()
 
     dbmap = &gorp.DbMap{Db: db, Dialect: gorp.PostgresDialect{}}
-    dbmap.TraceOn("[gorp]", log.New(os.Stdout, "", log.Lmicroseconds))
+
+    if debug {
+        dbmap.TraceOn("[gorp]", log.New(os.Stdout, "", log.Lmicroseconds))
+    }
+
     wdb := dbmap.AddTableWithName(Word{}, "words").SetKeys(false, "word")
     _ = wdb
 
@@ -119,9 +134,13 @@ func main() {
             "rawtext text " +
         ");")
     // Don't actually handle the error, it's *usually* just "table already exists", which doesn't matter.
-    fmt.Println(err)
+    if debug {
+        fmt.Println(err)
+    }
     err = dbmap.CreateTables()
-    fmt.Println(err)
+    if debug {
+        fmt.Println(err)
+    }
     //if err != nil { 
     //    panic(err)
     //}
@@ -144,7 +163,6 @@ func main() {
             word = strings.ToLower(word)
             _, found := cache.Get(word)  // Lowercased words result in duplicates that violate the primary key restraint
             if !found {
-                fmt.Println(word)
                 w := &Word{Word: word, Count: 0}
                 err := dbmap.Insert(w)
                 if err != nil {
@@ -164,9 +182,11 @@ func main() {
     }
 
     if c == 0 {
-        processText()
+        processText(dir)
     } else {
-        fmt.Println("Don't need to process text")
+        if debug {
+            fmt.Println("Don't need to process text")
+        }
     }
 
     row = db.QueryRow("select count(*) c from wordsets where winner=true")
@@ -178,7 +198,9 @@ func main() {
     if c == 0 {
         scoreWinners()
     } else {
-        fmt.Println("Don't need to score winners")
+        if debug {
+            fmt.Println("Don't need to score winners")
+        }
     }
 
     var finalReplacements [][]string
@@ -204,7 +226,7 @@ func scoreWinners() {
         Word2 string
     }
 
-    list, err := dbmap.Select(wordScores{}, "select wordsets.word, wordscores1.wordcount+wordscores2.wordcount score, word1, word2 from wordsets join (select word, wordcount from words) wordscores1 on wordsets.word1=wordscores1.word join (select word, wordcount from words) wordscores2 on wordsets.word2=wordscores2.word where not rawword ~ '[a-zA-Z][.,:!?]+[^a-z]*[A-Z]' group by wordsets.word, word1, word2, score order by wordsets.word, score desc;")
+    list, err := dbmap.Select(wordScores{}, "select wordsets.word, wordscores1.wordcount+wordscores2.wordcount score, word1, word2 from wordsets join (select word, wordcount from words) wordscores1 on wordsets.word1=wordscores1.word join (select word, wordcount from words) wordscores2 on wordsets.word2=wordscores2.word where not rawword ~ '[a-zA-Z][.,:!?]+[^a-z]*[A-Z]' and not wordscores1.wordcount=0 and not wordscores1.wordcount=0 group by wordsets.word, word1, word2, score order by wordsets.word, score desc;")
     if err != nil {
         panic(err)
     }
@@ -222,7 +244,7 @@ func scoreWinners() {
     }
 }
 
-func processText() {
+func processText(dir string) {
     list, _ := dbmap.Select(Word{}, "select word from words")
     for _, word := range list {
         word := word.(*Word)
@@ -264,7 +286,6 @@ func processText() {
         }
     }()
 
-    dir := "./trans/gwt"
     files, _ := ioutil.ReadDir(dir)
     for _, filename := range files {
         if filename.Name() != "2COR.2.gwt" {
@@ -383,12 +404,12 @@ func parseChapter() {
 
         var m map[string]*json.RawMessage
         err = json.Unmarshal(b, &m)
-        fmt.Println(err)
-        //fmt.Println(m)
+        if err != nil {
+            panic(err)
+        }
 
         var s string
         json.Unmarshal(*m["content"], &s)
-        //fmt.Println(s)
 
         node, err := html.Parse(strings.NewReader(s))
         if err != nil {
@@ -444,13 +465,13 @@ func processVerse() {
         var isWord bool
         var err error
 
-        regex1 := regexp.MustCompile("^\\(?[A-Z]")
-        regex2 := regexp.MustCompile("(^[0-9]+$|arand|nebat|shallum|arza)")
+        rawWordRegex := regexp.MustCompile("^\\(?[A-Z]")
+        wordRegex := regexp.MustCompile("(^[0-9]+$|arand|nebat|shallum|arza|great-great-grandson|tent-like|super-apostles|half-sheet|calf-shaped|non-jews|spring-fed|cross-examines|non-israelites)")
         for i, word := range verse.words {
-            if regex1.MatchString(verse.rawWords[i]) {
+            if rawWordRegex.MatchString(verse.rawWords[i]) {
                 continue
             }
-            if regex2.MatchString(verse.words[i]) {
+            if wordRegex.MatchString(verse.words[i]) {
                 continue
             }
 
@@ -461,6 +482,12 @@ func processVerse() {
 
             isJoinedWord := false
             isWord = checkIsWord(word)
+
+            if isWord == false && strings.HasSuffix(word, "s") {
+                chars := strings.Split(word, "")
+                isWord = checkIsWord(strings.Join(chars[:len(chars)-1], ""))
+            }
+
             if isWord == false {
                 splitWord := strings.Split(word, "")
                 for letter := 1; letter < len(word)-1; letter++ {
@@ -468,7 +495,9 @@ func processVerse() {
                     half2 := strings.Join(splitWord[letter:], "")
 
                     if checkIsWord(half1) && checkIsWord(half2) {
-                        fmt.Printf("Inserting the following words for %s: %s, %s\n", word, half1, half2)
+                        if debug {
+                            fmt.Printf("Inserting the following words for %s: %s, %s\n", word, half1, half2)
+                        }
                         wordSet := &Wordset{Word: word, Word1: half1, Word2: half2, Book: verse.book, Chapter: verse.chapter, Verse: verse.num, RawWord: verse.rawWords[i], Text: verse.text, RawText: verse.rawText}
                         err = dbmap.Insert(wordSet)
                         if err != nil {
@@ -479,9 +508,13 @@ func processVerse() {
 
                 }
                 if isJoinedWord == false {
-                    fmt.Println("Adding " + word + " to the DB")
+                    if debug {
+                        fmt.Println("Adding " + word + " to the DB")
+                    }
                     w := &Word{Word: word, Count: 1}
-                    fmt.Println(w)
+                    if debug {
+                        fmt.Println(w)
+                    }
                     err := dbmap.Insert(w)
                     if err != nil {
                         panic(err)
