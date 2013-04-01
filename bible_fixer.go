@@ -376,7 +376,7 @@ func unmungeWord(rawWord, half1, half2 string) ([]string) {
         rawHalf1 = append(rawHalf1, char)
         if mungeWord(strings.Join(rawHalf1, "")) == half1 {
             for _, char := range chars[i+1:] {
-                if regex.MatchString(char) {
+                if regex.MatchString(char) && char != "‘" && char != "“" {
                     rawHalf1 = append(rawHalf1, char)
                 } else {
                     rawHalf2 = append(rawHalf2, char)
