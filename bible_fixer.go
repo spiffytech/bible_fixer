@@ -226,7 +226,7 @@ func scoreWinners() {
         Word2 string
     }
 
-    list, err := dbmap.Select(wordScores{}, "select wordsets.word, wordscores1.wordcount+wordscores2.wordcount score, word1, word2 from wordsets join (select word, wordcount from words) wordscores1 on wordsets.word1=wordscores1.word join (select word, wordcount from words) wordscores2 on wordsets.word2=wordscores2.word where not rawword ~ '[a-zA-Z][.,:!?]+[^a-z]*[A-Z]' and not wordscores1.wordcount=0 and not wordscores1.wordcount=0 group by wordsets.word, word1, word2, score order by wordsets.word, score desc;")
+    list, err := dbmap.Select(wordScores{}, "select wordsets.word, wordscores1.wordcount+wordscores2.wordcount score, word1, word2 from wordsets join (select word, wordcount from words) wordscores1 on wordsets.word1=wordscores1.word join (select word, wordcount from words) wordscores2 on wordsets.word2=wordscores2.word where not rawword ~ '[a-zA-Z][.,:!?]+[^a-z]*[A-Z]' and not wordscores1.wordcount=0 and not wordscores2.wordcount=0 group by wordsets.word, word1, word2, score order by wordsets.word, score desc;")
     if err != nil {
         panic(err)
     }
@@ -490,7 +490,7 @@ func processVerse() {
 
             if isWord == false {
                 splitWord := strings.Split(word, "")
-                for letter := 1; letter < len(word)-1; letter++ {
+                for letter := 1; letter < len(word); letter++ {
                     half1 := strings.Join(splitWord[:letter], "")
                     half2 := strings.Join(splitWord[letter:], "")
 
@@ -504,7 +504,7 @@ func processVerse() {
                             panic(err)
                         }
                         isJoinedWord = true
-                    }   
+                    }
 
                 }
                 if isJoinedWord == false {
