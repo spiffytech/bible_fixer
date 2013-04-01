@@ -183,11 +183,11 @@ func main() {
 
     var finalReplacements [][]string
 
-    list, err := dbmap.Select(Wordset{}, "select * from wordsets where winner=true")
+    list, err := dbmap.Select(Wordset{}, "select * from wordsets where winner=true order by book, chapter, verse, word asc")
     for _, word := range list {
         wordSet := word.(*Wordset)
         unmunged := unmungeWord(wordSet.RawWord, wordSet.Word1, wordSet.Word1)
-        stuff := append([]string{wordSet.Book, strconv.Itoa(wordSet.Chapter), strconv.Itoa(wordSet.Verse)}, unmunged...)
+        stuff := append([]string{wordSet.Book, strconv.Itoa(wordSet.Chapter), strconv.Itoa(wordSet.Verse), wordSet.RawWord}, strings.Join(unmunged, " "))
 
         finalReplacements = append(finalReplacements, stuff)
     }
@@ -354,19 +354,20 @@ func unmungeWord(rawWord, half1, half2 string) ([]string) {
     for i, char := range chars {
         rawHalf1 = append(rawHalf1, char)
         if mungeWord(strings.Join(rawHalf1, "")) == half1 {
-            for _, char := range chars[i:] {
+            for _, char := range chars[i+1:] {
                 if regex.MatchString(char) {
                     rawHalf1 = append(rawHalf1, char)
-                    continue
                 } else {
-                    rawHalf2 = append(rawHalf1, char)
+                    rawHalf2 = append(rawHalf2, char)
                 }
             }
-        }
-    }
 
-    if len(rawHalf1) == 0 || len(rawHalf2) == 0  {
-        panic("Couldn't find match: " + rawWord + ": " + half1 + " " + half2)
+            if len(rawHalf1) == 0 || len(rawHalf2) == 0  {
+                panic(fmt.Sprintf("Couldn't unmunge '%s' - %s (%s), %s (%s)", rawWord, half1, strings.Join(rawHalf1, ""), half2, strings.Join(rawHalf2, "")))
+            }
+
+            break
+        }
     }
 
     return []string{strings.Join(rawHalf1, ""), strings.Join(rawHalf2, "")}
