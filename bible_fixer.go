@@ -205,16 +205,18 @@ func main() {
 
     var finalReplacements [][]string
 
+    writer := csv.NewWriter(os.Stdout)
+    writer.Write([]string{"book", "chapter", "verse", "rawWord", "word1", "word2"})
+
     list, err := dbmap.Select(Wordset{}, "select * from wordsets where winner=true order by book, chapter, verse, word asc")
     for _, word := range list {
         wordSet := word.(*Wordset)
         unmunged := unmungeWord(wordSet.RawWord, wordSet.Word1, wordSet.Word1)
-        stuff := append([]string{wordSet.Book, strconv.Itoa(wordSet.Chapter), strconv.Itoa(wordSet.Verse), wordSet.RawWord}, strings.Join(unmunged, " "))
+        stuff := append([]string{wordSet.Book, strconv.Itoa(wordSet.Chapter), strconv.Itoa(wordSet.Verse), wordSet.RawWord}, unmunged...)
 
         finalReplacements = append(finalReplacements, stuff)
     }
 
-    writer := csv.NewWriter(os.Stdout)
     writer.WriteAll(finalReplacements)
 }
 
