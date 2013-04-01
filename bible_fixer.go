@@ -3,6 +3,7 @@ package main
 import (
     "database/sql"
     "encoding/json"
+    "encoding/csv"
     "fmt"
     "io/ioutil"
     "log"
@@ -14,7 +15,7 @@ import (
     "strings"
     "sync"
     "time"
-    
+
      _ "github.com/bmizerany/pq"
     "github.com/coopernurse/gorp"
     "code.google.com/p/go.net/html"
@@ -37,6 +38,7 @@ type Wordset struct {
     Verse int `db:"verse"`
     Text string `db:"text"`
     RawText string `db:"rawText"`
+    Winner bool `db:"winner"`
 }
 
 type Chapter struct {
@@ -66,17 +68,21 @@ func (e *Error) Error() string {
 
 var num_procs = runtime.NumCPU()
 var dbmap *gorp.DbMap
+
+var cache = gocache.New(5*time.Hour, 30*time.Second)
+var wordCounts = gocache.New(5*time.Hour, 30*time.Second)
+
 var verseWg sync.WaitGroup
 var rawVerseWg sync.WaitGroup
 var chapterWg sync.WaitGroup
-var cache = gocache.New(5*time.Hour, 30*time.Second)
-var wordCounts = gocache.New(5*time.Hour, 30*time.Second)
+
 var chaptersIn = make(chan Chapter)
 var chaptersOut = make(chan Verse)
 var versesIn = make(chan Verse)
 var versesOut = make(chan Verse)
 var rawVersesIn = make(chan Verse)
 var rawVersesOut = make(chan Verse)
+
 var numRawVerseWorkers = num_procs
 var numVerseWorkers = num_procs
 var numChapterWorkers = num_procs
@@ -130,10 +136,8 @@ func main() {
     var c int
     err = row.Scan(&c)
     if err != nil {
-        fmt.Println(err)
-        return
+        panic(err)
     }
-    fmt.Println(c)
 
     if c == 0 {
         for _, word := range words {
@@ -149,16 +153,82 @@ func main() {
                 cache.Set(word, true, -1)
             }
         }
-    } else {
-        list, _ := dbmap.Select(Word{}, "select word from words")
-        for _, word := range list {
-            word := word.(*Word)
-            cache.Set(word.Word, true, -1)
-        }
     }
 
     dbmap.Exec("create index if not exists wordsindex on words (lower(word));")
-    dbmap.Exec("delete from wordsets where 1=1")
+
+    row = db.QueryRow("select count(*) c from wordsets")
+    err = row.Scan(&c)
+    if err != nil {
+        panic(err)
+    }
+
+    if c == 0 {
+        processText()
+    } else {
+        fmt.Println("Don't need to process text")
+    }
+
+    row = db.QueryRow("select count(*) c from wordsets where winner=true")
+    err = row.Scan(&c)
+    if err != nil {
+        panic(err)
+    }
+
+    if c == 0 {
+        scoreWinners()
+    } else {
+        fmt.Println("Don't need to score winners")
+    }
+
+    var finalReplacements [][]string
+
+    list, err := dbmap.Select(Wordset{}, "select * from wordsets where winner=true")
+    for _, word := range list {
+        wordSet := word.(*Wordset)
+        unmunged := unmungeWord(wordSet.RawWord, wordSet.Word1, wordSet.Word1)
+        stuff := append([]string{wordSet.Book, strconv.Itoa(wordSet.Chapter), strconv.Itoa(wordSet.Verse)}, unmunged...)
+
+        finalReplacements = append(finalReplacements, stuff)
+    }
+
+    writer := csv.NewWriter(os.Stdout)
+    writer.WriteAll(finalReplacements)
+}
+
+func scoreWinners() {
+    type wordScores struct {
+        Score int
+        Word string
+        Word1 string
+        Word2 string
+    }
+
+    list, err := dbmap.Select(wordScores{}, "select wordsets.word, wordscores1.wordcount+wordscores2.wordcount score, word1, word2 from wordsets join (select word, wordcount from words) wordscores1 on wordsets.word1=wordscores1.word join (select word, wordcount from words) wordscores2 on wordsets.word2=wordscores2.word where not rawword ~ '[a-zA-Z][.,:!?]+[^a-z]*[A-Z]' group by wordsets.word, word1, word2, score order by wordsets.word, score desc;")
+    if err != nil {
+        panic(err)
+    }
+
+    var wordReplacements = make(map[string][]string)
+    for _, word := range list {
+        wordReplacement := word.(*wordScores)
+        if _, ok := wordReplacements[wordReplacement.Word]; !ok {
+            _, err = dbmap.Exec("update wordsets set winner=true where word=$1 and word1=$2 and word2=$3", wordReplacement.Word, wordReplacement.Word1, wordReplacement.Word2)
+            if err != nil {
+                panic(err)
+            }
+            wordReplacements[wordReplacement.Word] = []string{wordReplacement.Word1, wordReplacement.Word2}
+        }
+    }
+}
+
+func processText() {
+    list, _ := dbmap.Select(Word{}, "select word from words")
+    for _, word := range list {
+        word := word.(*Word)
+        cache.Set(word.Word, true, -1)
+    }
+
     dbmap.Exec("update words set wordcount=0")
 
     chapterWg.Add(numChapterWorkers)
@@ -171,7 +241,7 @@ func main() {
     }
     verseWg.Add(numVerseWorkers)
     for i := 0; i < numVerseWorkers; i++ {
-        go progessVerse()
+        go processVerse()
     }
 
     go func() {
@@ -187,8 +257,6 @@ func main() {
             versesIn <- verse
         }
         close(versesIn)
-        verseWg.Wait()
-        close(versesOut)
     }()
     go func() {
         for verse := range versesOut {
@@ -223,6 +291,9 @@ func main() {
     chapterWg.Wait()
     close(chaptersOut)
 
+    verseWg.Wait()
+    close(versesOut)
+
     list, err := dbmap.Select(Word{}, "select word from words")
     for _, word := range list {
         word := word.(*Word)
@@ -252,6 +323,53 @@ func checkIsWord(word string) (isWord bool) {
     }
 
     return isWord
+}
+
+
+func mungeWord(word string) string {
+    word = strings.ToLower(word)
+
+    word = strings.Replace(word, "’", "'", -1)
+
+    reg := regexp.MustCompile("'$")
+    word = reg.ReplaceAllString(word, "")
+
+    reg = regexp.MustCompile("[^a-zA-Z0-9' -]")
+    word = reg.ReplaceAllString(word, "")
+
+    word = strings.TrimSpace(word)
+    word = strings.Trim(word, "'")
+
+    return word
+}
+
+
+func unmungeWord(rawWord, half1, half2 string) ([]string) {
+    var rawHalf1 []string
+    var rawHalf2 []string
+
+    regex := regexp.MustCompile("[^A-Za-z]")
+
+    chars := strings.Split(rawWord, "")
+    for i, char := range chars {
+        rawHalf1 = append(rawHalf1, char)
+        if mungeWord(strings.Join(rawHalf1, "")) == half1 {
+            for _, char := range chars[i:] {
+                if regex.MatchString(char) {
+                    rawHalf1 = append(rawHalf1, char)
+                    continue
+                } else {
+                    rawHalf2 = append(rawHalf1, char)
+                }
+            }
+        }
+    }
+
+    if len(rawHalf1) == 0 || len(rawHalf2) == 0  {
+        panic("Couldn't find match: " + rawWord + ": " + half1 + " " + half2)
+    }
+
+    return []string{strings.Join(rawHalf1, ""), strings.Join(rawHalf2, "")}
 }
 
 
@@ -309,35 +427,24 @@ func processRawVerse() {
         verse.rawText = text
         verse.rawWords = strings.Fields(text)
 
-        text = strings.ToLower(text)
-
-        text = strings.Replace(text, "’", "'", -1)
-
-        reg = regexp.MustCompile("'$")
-        text = reg.ReplaceAllString(text, "")
-
-        reg = regexp.MustCompile("[^a-zA-Z0-9' -]")
-        text = reg.ReplaceAllString(text, "")
-
-        text = strings.TrimSpace(text)
-
-        verse.text = text
-        verse.words = strings.Fields(text)
+        for _, word := range verse.rawWords {
+            verse.words = append(verse.words, mungeWord(word))
+        }
 
         rawVersesOut <- verse
     }
 }
 
 
-func progessVerse() {
+func processVerse() {
     defer verseWg.Done()
 
     for verse := range versesIn {
         var isWord bool
         var err error
 
-        regex1 := regexp.MustCompile("^[A-Z]")
-        regex2 := regexp.MustCompile("(^[0-9]+$|arand|nebat)")
+        regex1 := regexp.MustCompile("^\\(?[A-Z]")
+        regex2 := regexp.MustCompile("(^[0-9]+$|arand|nebat|shallum|arza)")
         for i, word := range verse.words {
             if regex1.MatchString(verse.rawWords[i]) {
                 continue
