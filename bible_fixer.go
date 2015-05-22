@@ -291,10 +291,6 @@ func processText(dir string) {
 
     files, _ := ioutil.ReadDir(dir)
     for _, filename := range files {
-        if filename.Name() != "2COR.2.gwt" {
-            //continue
-        }
-
         path := path.Join(dir, filename.Name())
 
         regex := regexp.MustCompile(`(?P<book>\S+)\.(?P<chapter>\d+).gwt`)
