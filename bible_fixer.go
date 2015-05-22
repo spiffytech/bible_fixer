@@ -20,7 +20,7 @@ import (
      _ "github.com/bmizerany/pq"
     "github.com/coopernurse/gorp"
     "code.google.com/p/go.net/html"
-    gq "github.com/matrixik/goquery"
+    gq "github.com/PuerkitoBio/goquery"
     gocache "github.com/pmylund/go-cache"
 )
 
