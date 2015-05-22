@@ -141,9 +141,6 @@ func main() {
     if debug {
         fmt.Println(err)
     }
-    //if err != nil { 
-    //    panic(err)
-    //}
 
     b, err := ioutil.ReadFile("words")
     if err != nil { 
@@ -306,9 +303,6 @@ func processText(dir string) {
 
         chapter := Chapter{book: bookName, chapter: chapterNum, path: path}
         chaptersIn <- chapter
-        //_ = path.Join
-        //_ = files
-        //parseChapter("trans/gwt/2COR.2.gwt");
     }
     close(chaptersIn)
     chapterWg.Wait()
