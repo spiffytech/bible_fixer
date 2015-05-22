@@ -121,7 +121,7 @@ func main() {
     _ = wsdb
 
     // PostgreSQL 9.1 introduces "create if not exists". I'm on 8.4 :(
-    // Using this instead of CreatTables() begause gorp doesn't presently support 'text' column types
+    // Using this instead of CreateTables() begause gorp doesn't presently support 'text' column types
     _, err = dbmap.Exec("create table wordsets ( " + 
             "rawword character varying(255), " +
             "word character varying(255), " +
@@ -172,6 +172,8 @@ func main() {
 
     dbmap.Exec("create index if not exists wordsindex on words (lower(word));")
 
+    // If a previous script run already found the typoed words, and we're just
+    // scoring the results, skip over the typo search
     row = db.QueryRow("select count(*) c from wordsets")
     err = row.Scan(&c)
     if err != nil {
@@ -186,6 +188,7 @@ func main() {
         }
     }
 
+    // Skip scoring if we're working on printing script results
     row = db.QueryRow("select count(*) c from wordsets where winner=true")
     err = row.Scan(&c)
     if err != nil {
@@ -243,6 +246,7 @@ func scoreWinners() {
     }
 }
 
+// Reads Bible text, parses words, finds typoes, counts word frequency
 func processText(dir string) {
     list, _ := dbmap.Select(Word{}, "select word from words")
     for _, word := range list {
@@ -343,6 +347,7 @@ func checkIsWord(word string) (isWord bool) {
 }
 
 
+// Fix artifacts in the text. MS Smart Quotes, trailing quotes, etc.
 func mungeWord(word string) string {
     word = strings.ToLower(word)
 
@@ -361,6 +366,7 @@ func mungeWord(word string) string {
 }
 
 
+// Attempt to split joined words when they're separated by odd punctuation
 func unmungeWord(rawWord, half1, half2 string) ([]string) {
     var rawHalf1 []string
     var rawHalf2 []string
