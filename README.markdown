@@ -14,4 +14,11 @@ Install
 
 `npm install` should take care of the downloader. 
 
-`go install; go build bible_fixer.go` should take care of the processing program.
+For the golang portion, which processes the text and finds typos:
+
+    go get github.com/bmizerany/pq
+    go get github.com/coopernurse/gorp
+    go get golang.org/x/net/html
+    go get github.com/PuerkitoBio/goquery
+    go get github.com/pmylund/go-cache
+    go build
